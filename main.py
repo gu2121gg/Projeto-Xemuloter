@@ -1,381 +1,636 @@
-#=============== IMPORTAÇÕES ===============
-import pygame
 import os
 import sys
-import time
+import ctypes
+import requests
+import tkinter as tk
+from tkinter import ttk, messagebox
+from PIL import Image, ImageTk
+import pygame
+import pygame.joystick
 import subprocess
-from pathlib import Path
-from typing import Dict, Tuple, List, Optional
-from math import sin, pi, cos
-from enum import Enum, auto
-import random
-from jogos import GerenciadorJogos, Jogo
+import threading
+import time
+import math
+from io import BytesIO
+import traceback
+import json
+import hashlib
 
-#=============== CONFIGURAÇÕES INICIAIS ===============
-pygame.init()
-pygame.joystick.init()
-pygame.mixer.init()
+# ====================== CONFIGURAÇÕES ======================
+class Config:
+    WIDTH, HEIGHT = 1280, 720
+    CARD_WIDTH, CARD_HEIGHT = 300, 420
+    FPS = 60
+    
+    # Cores
+    BG_COLOR = "#0a0a1a"
+    MENU_COLOR = "#16213E"
+    SELECTED_COLOR = "#00b4d8"
+    TEXT_COLOR = "#ffffff"
+    ACCENT_COLOR = "#ff9e00"
+    CARD_BG = "#1a1a2e"
+    DOWNLOAD_BTN_COLOR = "#ff2d75"
+    
+    # Caminhos
+    DOWNLOADS_DIR = "downloads"
+    ASSETS_DIR = "assets"
+    CONFIG_FILE = "config.json"
+    
+    # Sons
+    SOUNDS = {
+        "startup": "audio/startup.wav",
+        "select": "audio/select.wav",
+        "confirm": "audio/confirm.wav",
+        "back": "audio/back.wav",
+        "navigate": "audio/navigate.wav"
+    }
 
-# Configuração de diretórios
-BASE_DIR = Path(__file__).parent
-ASSETS_DIR = BASE_DIR / "assets"
-
-# Cria diretórios se não existirem
-(ASSETS_DIR / "fonts").mkdir(parents=True, exist_ok=True)
-(ASSETS_DIR / "sounds").mkdir(parents=True, exist_ok=True)
-(ASSETS_DIR / "images").mkdir(parents=True, exist_ok=True)
-(ASSETS_DIR / "covers").mkdir(parents=True, exist_ok=True)
-
-# Configuração da tela
-SCREEN_WIDTH, SCREEN_HEIGHT = 1280, 720
-screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-pygame.display.set_caption("PS2 Launcher Premium HD")
-
-#=============== EFEITOS VISUAIS ===============
-class Particle:
-    def __init__(self, x, y, color):
-        self.x = x
-        self.y = y
-        self.color = color
-        self.size = random.randint(2, 5)
-        self.speed = random.uniform(1, 3)
-        self.angle = random.uniform(0, 2 * pi)
-        self.life = random.randint(30, 60)
-    
-    def update(self):
-        self.x += cos(self.angle) * self.speed
-        self.y += sin(self.angle) * self.speed
-        self.life -= 1
-        return self.life > 0
-    
-    def draw(self, surface):
-        alpha = min(255, self.life * 4)
-        color = (*self.color[:3], alpha)
-        pygame.draw.circle(surface, color, (int(self.x), int(self.y)), self.size)
-
-#=============== CONTROLE PS2 ===============
-class PS2Controller:
-    class Button(Enum):
-        CROSS = 0; CIRCLE = 1; SQUARE = 2; TRIANGLE = 3
-        L1 = 4; R1 = 5; SELECT = 8; START = 9; L3 = 10; R3 = 11
-    
-    class Axis(Enum):
-        LEFT_X = 0; LEFT_Y = 1; RIGHT_X = 2; RIGHT_Y = 3
-        L2 = 4; R2 = 5
-    
-    def __init__(self):
-        self.joystick = None
-        self._setup()
-    
-    def _setup(self):
-        if pygame.joystick.get_count() > 0:
-            self.joystick = pygame.joystick.Joystick(0)
-            self.joystick.init()
-            print(f"Controle conectado: {self.joystick.get_name()}")
-    
-    def get_button_pressed(self, button: Button) -> bool:
-        return self.joystick.get_button(button.value) if self.joystick else False
-    
-    def get_dpad(self) -> Tuple[int, int]:
-        return self.joystick.get_hat(0) if self.joystick and self.joystick.get_numhats() > 0 else (0, 0)
-
-#=============== SISTEMA DE ÁUDIO ===============
-class AudioSystem:
-    def __init__(self):
-        self.sounds = self._load_sounds()
-        self.sound_volume = 0.7
-    
-    def _load_sounds(self) -> Dict[str, pygame.mixer.Sound]:
-        sounds = {}
-        for name in ["navigate", "confirm", "back", "select"]:
-            try:
-                path = ASSETS_DIR / "sounds" / f"{name}.wav"
-                if path.exists():
-                    sounds[name] = pygame.mixer.Sound(path)
-            except: pass
-        return sounds
-    
-    def play(self, sound_name: str):
-        if sound_name in self.sounds:
-            self.sounds[sound_name].set_volume(self.sound_volume)
-            self.sounds[sound_name].play()
-
-#=============== BOTÃO ESTILO PS2 ===============
-class PS2Button:
-    def __init__(self, x, y, text, icon=None, width=300, height=80):
-        self.rect = pygame.Rect(x, y, width, height)
-        self.text = text
-        self.icon = self._load_icon(icon) if icon else None
-        self.selected = False
-        self.anim_progress = 0
-        self.particles = []
-        self.original_y = y
-    
-    def _load_icon(self, icon_path: str) -> pygame.Surface:
+# ====================== UTILITÁRIOS ======================
+class Utils:
+    @staticmethod
+    def is_admin():
         try:
-            path = ASSETS_DIR / "images" / icon_path if not icon_path.startswith("covers/") else ASSETS_DIR / icon_path
-            if path.exists():
-                icon = pygame.image.load(str(path)).convert_alpha()
-                size = 50 if not icon_path.startswith("covers/") else 80
-                return pygame.transform.scale(icon, (size, size))
-        except Exception as e:
-            print(f"Erro ao carregar ícone: {e}")
-        return None
-    
-    def update(self, dt):
-        if self.selected:
-            self.anim_progress = min(1, self.anim_progress + dt * 3)
-            self.rect.y = self.original_y - sin(self.anim_progress * pi) * 10
-            
-            if random.random() < 0.3:
-                color = (random.randint(100, 200), random.randint(100, 200), 255)
-                self.particles.append(Particle(
-                    self.rect.centerx + random.randint(-20, 20),
-                    self.rect.centery + random.randint(-10, 10),
-                    color
-                ))
-        else:
-            self.anim_progress = max(0, self.anim_progress - dt * 3)
-            self.rect.y = self.original_y
-        
-        self.particles = [p for p in self.particles if p.update()]
-    
-    def draw(self, surface, theme):
-        for p in self.particles:
-            p.draw(surface)
-        
-        if self.selected:
-            glow_size = int(self.anim_progress * 20)
-            glow = pygame.Surface((self.rect.w + glow_size*2, self.rect.h + glow_size*2), pygame.SRCALPHA)
-            pygame.draw.rect(glow, (*theme["highlight"], int(self.anim_progress * 100)), 
-                            glow.get_rect(), border_radius=20)
-            surface.blit(glow, (self.rect.x - glow_size, self.rect.y - glow_size))
-        
-        color = theme["accent"] if self.selected else theme["button"]
-        pygame.draw.rect(surface, color, self.rect, border_radius=15)
-        pygame.draw.rect(surface, theme["highlight"], self.rect, 3, border_radius=15)
-        
-        if self.icon:
-            icon_rect = self.icon.get_rect(center=(self.rect.x + 45 if not isinstance(self.icon, str) or not self.icon.startswith("covers/") else self.rect.x + 100, 
-                                          self.rect.centery))
-            surface.blit(self.icon, icon_rect)
-        
-        try:
-            font = pygame.font.Font(str(ASSETS_DIR / "fonts/ps_bold.ttf"), 32)
-            text_pos = (self.rect.centerx + (40 if self.icon and not isinstance(self.icon, str) or not self.icon.startswith("covers/") else 0), 
-                       self.rect.centery)
-            
-            shadow = font.render(self.text, True, (0, 0, 0, 100))
-            surface.blit(shadow, (text_pos[0] + 3 - shadow.get_width()//2, text_pos[1] + 3 - shadow.get_height()//2))
-            
-            text = font.render(self.text, True, theme["text"])
-            surface.blit(text, (text_pos[0] - text.get_width()//2, text_pos[1] - text.get_height()//2))
+            return ctypes.windll.shell32.IsUserAnAdmin()
         except:
-            font = pygame.font.Font(None, 32)
-            text = font.render(self.text, True, theme["text"])
-            surface.blit(text, self.rect)
+            return False
 
-#=============== MENU PRINCIPAL ===============
-class MainMenu:
-    def __init__(self, audio: AudioSystem, controller: PS2Controller):
-        self.audio = audio
-        self.controller = controller
-        self.gerenciador_jogos = GerenciadorJogos()
-        self.tela_atual = "menu"  # menu | jogos | config
-        self.buttons_menu = self._criar_menu_principal()
-        self.buttons_jogos = self._criar_menu_jogos()
+    @staticmethod
+    def run_as_admin():
+        ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, " ".join(sys.argv), None, None, 1)
+        sys.exit()
+
+    @staticmethod
+    def hsv_to_rgb(h, s, v):
+        h_i = int(h*6)
+        f = h*6 - h_i
+        p = v * (1 - s)
+        q = v * (1 - f*s)
+        t = v * (1 - (1 - f)*s)
+        
+        if h_i == 0: r, g, b = v, t, p
+        elif h_i == 1: r, g, b = q, v, p
+        elif h_i == 2: r, g, b = p, v, t
+        elif h_i == 3: r, g, b = p, q, v
+        elif h_i == 4: r, g, b = t, p, v
+        else: r, g, b = v, p, q
+            
+        return f"#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}"
+
+    @staticmethod
+    def md5(file_path):
+        hash_md5 = hashlib.md5()
+        with open(file_path, "rb") as f:
+            for chunk in iter(lambda: f.read(4096), b""):
+                hash_md5.update(chunk)
+        return hash_md5.hexdigest()
+
+# ====================== GERENCIADOR DE ÁUDIO ======================
+class AudioManager:
+    def __init__(self):
+        self.sounds = {}
+        self.setup_audio()
+
+    def setup_audio(self):
+        try:
+            pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=2048)
+            
+            for name, path in Config.SOUNDS.items():
+                full_path = os.path.join(Config.ASSETS_DIR, path)
+                if os.path.exists(full_path):
+                    self.sounds[name] = pygame.mixer.Sound(full_path)
+                    self.sounds[name].set_volume(0.7)
+                else:
+                    self._create_fallback_sound(name)
+        except Exception as e:
+            print(f"Erro ao inicializar áudio: {e}")
+            self._create_all_fallback_sounds()
+
+    def _create_fallback_sound(self, name):
+        samples = []
+        duration = 0.3
+        
+        if name == "startup": freq = 523.25
+        elif name == "confirm": freq = 783.99
+        elif name == "back": freq = 392.00
+        else: freq = 659.25
+            
+        for i in range(int(22050 * duration)):
+            value = int(32767 * 0.3 * math.sin(2 * math.pi * freq * i / 22050))
+            samples.append(value)
+        
+        self.sounds[name] = pygame.mixer.Sound(buffer=bytearray(samples))
+
+    def _create_all_fallback_sounds(self):
+        for name in Config.SOUNDS.keys():
+            self._create_fallback_sound(name)
+
+    def play(self, sound_name):
+        if sound_name in self.sounds:
+            try:
+                self.sounds[sound_name].play()
+            except:
+                pass
+
+# ====================== GERENCIADOR DE JOGOS ======================
+class GameManager:
+    def __init__(self):
+        self.games = self._load_games()
+        self.create_directories()
+
+    def _load_games(self):
+        try:
+            with open(os.path.join(Config.ASSETS_DIR, "games.json"), "r") as f:
+                return json.load(f)
+        except:
+            return [
+                {
+                    "title": "Jogo de Teste",
+                    "image": "games/test_game.jpg",
+                    "size": "10 MB",
+                    "exe_name": "ChromeSetup.exe",
+                    "download_url": "https://drive.usercontent.google.com/download?id=1sbAijvGUPPnt5nG2kv_6Cp0DSCCZGtNV&export=download&authuser=0",
+                    "md5": "d41d8cd98f00b204e9800998ecf8427e"
+                }
+            ]
+
+    def create_directories(self):
+        os.makedirs(Config.DOWNLOADS_DIR, exist_ok=True)
+        os.makedirs(os.path.join(Config.ASSETS_DIR, "audio"), exist_ok=True)
+        os.makedirs(os.path.join(Config.ASSETS_DIR, "games"), exist_ok=True)
+
+    def is_game_installed(self, exe_name):
+        exe_path = os.path.join(Config.DOWNLOADS_DIR, exe_name)
+        return os.path.exists(exe_path)
+
+    def verify_game_integrity(self, exe_name, expected_md5):
+        exe_path = os.path.join(Config.DOWNLOADS_DIR, exe_name)
+        if not os.path.exists(exe_path):
+            return False
+            
+        return Utils.md5(exe_path) == expected_md5
+
+# ====================== INTERFACE GRÁFICA ======================
+class GameLauncherUI:
+    def __init__(self, root):
+        self.root = root
+        self.setup_window()
+        self.audio = AudioManager()
+        self.game_manager = GameManager()
+        self.joystick = None
+        
+        self.current_screen = "main"
+        self.menu_items = ["Jogos", "Sair"]
         self.selected_index = 0
-        self.last_input_time = 0
-        self.input_delay = 0.15
-        self.theme = {
-            "bg": (20, 20, 40),
-            "button": (50, 50, 80),
-            "text": (220, 220, 250),
-            "accent": (0, 200, 255),
-            "highlight": (100, 200, 255)
-        }
-        self.background = self._create_background()
-    
-    def _create_background(self):
-        bg = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))
-        for y in range(SCREEN_HEIGHT):
-            alpha = int((y / SCREEN_HEIGHT) * 150)
-            color = (20 + alpha//2, 40 + alpha//3, 80 + alpha//4)
-            pygame.draw.line(bg, color, (0, y), (SCREEN_WIDTH, y))
+        self.game_cards = []
+        self.selected_card_index = 0
+        self.running = True
         
-        for y in range(0, SCREEN_HEIGHT, 2):
-            pygame.draw.line(bg, (0, 0, 0, 10), (0, y), (SCREEN_WIDTH, y))
+        self.setup_joystick()
+        self.setup_main_menu()
+        self.start_control_loop()
         
-        return bg
-    
-    def _criar_menu_principal(self):
-        return [
-            PS2Button(SCREEN_WIDTH//2 - 150, 250, "Jogos", "game_icon.png"),
-            PS2Button(SCREEN_WIDTH//2 - 150, 350, "Configurações", "settings_icon.png"),
-            PS2Button(SCREEN_WIDTH//2 - 150, 450, "Extras", "extras_icon.png"),
-            PS2Button(SCREEN_WIDTH//2 - 150, 550, "Sair", "exit_icon.png")
-        ]
-    
-    def _criar_menu_jogos(self):
-        buttons = []
-        for i, jogo in enumerate(self.gerenciador_jogos.jogos):
-            btn = PS2Button(
-                x=100 + (i % 3) * 400,
-                y=150 + (i // 3) * 180,
-                text=jogo.nome,
-                icon=f"covers/{jogo.imagem}",
-                width=350,
-                height=150
-            )
-            buttons.append(btn)
-        return buttons
-    
-    def _change_selection(self, direction):
-        current_buttons = self.buttons_jogos if self.tela_atual == "jogos" else self.buttons_menu
+        self.audio.play("startup")
+        self.animate_title()
+
+    def setup_window(self):
+        self.root.title("Game Launcher Premium")
+        self.root.geometry(f"{Config.WIDTH}x{Config.HEIGHT}")
+        self.root.configure(bg=Config.BG_COLOR)
         
-        if not current_buttons:
+        # Centraliza
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        x = (screen_width - Config.WIDTH) // 2
+        y = (screen_height - Config.HEIGHT) // 2
+        self.root.geometry(f"+{x}+{y}")
+
+    def setup_joystick(self):
+        try:
+            pygame.joystick.init()
+            if pygame.joystick.get_count() > 0:
+                self.joystick = pygame.joystick.Joystick(0)
+                self.joystick.init()
+        except Exception as e:
+            print(f"Erro no controle: {e}")
+
+    def setup_main_menu(self):
+        self.main_canvas = tk.Canvas(self.root, bg=Config.BG_COLOR, highlightthickness=0)
+        self.main_canvas.pack(fill="both", expand=True)
+        
+        # Título
+        self.title_text = self.main_canvas.create_text(
+            Config.WIDTH//2, Config.HEIGHT//4,
+            text="GAME LAUNCHER",
+            font=("Arial", 48, "bold"),
+            fill=Config.SELECTED_COLOR,
+            tags="title")
+        
+        # Itens do menu
+        self.menu_rects = []
+        self.menu_texts = []
+        
+        for i, item in enumerate(self.menu_items):
+            y_pos = Config.HEIGHT//2 + i*80
+            
+            rect = self.main_canvas.create_rectangle(
+                Config.WIDTH//2 - 250, y_pos - 35,
+                Config.WIDTH//2 + 250, y_pos + 35,
+                fill=Config.MENU_COLOR,
+                outline="",
+                width=0,
+                tags=f"menu_{i}")
+            
+            text = self.main_canvas.create_text(
+                Config.WIDTH//2, y_pos,
+                text=item,
+                font=("Arial", 24),
+                fill=Config.TEXT_COLOR,
+                tags=f"menu_text_{i}")
+            
+            self.menu_rects.append(rect)
+            self.menu_texts.append(text)
+        
+        self.update_selection()
+
+    def animate_title(self):
+        for i in range(0, 360, 5):
+            if not self.running: return
+            color = Utils.hsv_to_rgb(i/360, 0.8, 1)
+            self.main_canvas.itemconfig("title", fill=color)
+            self.root.update()
+            time.sleep(0.05)
+
+    def setup_games_menu(self):
+        self.games_canvas = tk.Canvas(self.root, bg=Config.BG_COLOR, highlightthickness=0)
+        self.games_canvas.pack(fill="both", expand=True)
+        
+        # Título
+        self.games_canvas.create_text(
+            Config.WIDTH//2, 60,
+            text="JOGOS DISPONÍVEIS",
+            font=("Arial", 36, "bold"),
+            fill=Config.SELECTED_COLOR)
+        
+        # Frame para os cards
+        self.cards_frame = tk.Frame(self.games_canvas, bg=Config.BG_COLOR)
+        self.cards_frame.place(x=0, y=120, width=Config.WIDTH, height=Config.HEIGHT-180)
+        
+        self.create_game_cards()
+        
+        # Botão de voltar
+        self.back_btn = tk.Label(self.games_canvas, text="VOLTAR", 
+                               font=("Arial", 18, "bold"), 
+                               fg=Config.TEXT_COLOR, bg=Config.ACCENT_COLOR,
+                               padx=20, pady=10,
+                               relief="raised",
+                               borderwidth=3)
+        self.back_btn.place(x=50, y=Config.HEIGHT-80)
+        self.back_btn.bind("<Button-1>", lambda e: self.back_to_main())
+        self.back_btn.bind("<Enter>", lambda e: self.back_btn.config(bg="#ffb733"))
+        self.back_btn.bind("<Leave>", lambda e: self.back_btn.config(bg=Config.ACCENT_COLOR))
+
+    def create_game_cards(self):
+        self.game_cards = []
+        padding = 40
+        start_x = (Config.WIDTH - (3 * (Config.CARD_WIDTH + padding))) // 2
+        
+        for i, game in enumerate(self.game_manager.games):
+            row = i // 3
+            col = i % 3
+            
+            x = start_x + col * (Config.CARD_WIDTH + padding)
+            y = row * (Config.CARD_HEIGHT + padding)
+            
+            # Frame do card
+            card_frame = tk.Frame(self.cards_frame, bg=Config.CARD_BG, 
+                                 width=Config.CARD_WIDTH, height=Config.CARD_HEIGHT,
+                                 relief="raised", borderwidth=3)
+            card_frame.place(x=x, y=y)
+            
+            # Imagem do jogo
+            try:
+                img_path = os.path.join(Config.ASSETS_DIR, game["image"])
+                img = Image.open(img_path)
+                img = img.resize((Config.CARD_WIDTH-20, int(Config.CARD_HEIGHT*0.6)), Image.LANCZOS)
+                img_tk = ImageTk.PhotoImage(img)
+            except:
+                img = Image.new('RGB', (Config.CARD_WIDTH-20, int(Config.CARD_HEIGHT*0.6)), '#333333')
+                img_tk = ImageTk.PhotoImage(img)
+            
+            img_label = tk.Label(card_frame, image=img_tk, bg=Config.CARD_BG)
+            img_label.image = img_tk
+            img_label.pack(pady=10)
+            
+            # Título do jogo
+            title_label = tk.Label(card_frame, text=game["title"], 
+                                 font=("Arial", 16, "bold"), 
+                                 fg=Config.TEXT_COLOR, bg=Config.CARD_BG,
+                                 wraplength=Config.CARD_WIDTH-20)
+            title_label.pack(pady=5)
+            
+            # Tamanho do jogo
+            size_label = tk.Label(card_frame, text=f"Tamanho: {game['size']}", 
+                                font=("Arial", 12), 
+                                fg=Config.TEXT_COLOR, bg=Config.CARD_BG)
+            size_label.pack(pady=5)
+            
+            # Botão de ação
+            installed = self.game_manager.is_game_installed(game["exe_name"])
+            btn_text = "▶ JOGAR" if installed else "⬇ DOWNLOAD"
+            btn_color = Config.DOWNLOAD_BTN_COLOR if installed else "#4CAF50"
+            
+            action_btn = tk.Label(card_frame, text=btn_text, 
+                                font=("Arial", 14, "bold"), 
+                                fg=Config.TEXT_COLOR, bg=btn_color,
+                                padx=15, pady=5,
+                                relief="raised",
+                                borderwidth=2)
+            action_btn.pack(pady=10)
+            
+            # Efeitos hover
+            if installed:
+                action_btn.bind("<Enter>", lambda e, b=action_btn: b.config(bg="#ff4f8d"))
+                action_btn.bind("<Leave>", lambda e, b=action_btn: b.config(bg=Config.DOWNLOAD_BTN_COLOR))
+                action_btn.bind("<Button-1>", lambda e, exe=game["exe_name"]: self.launch_game(exe))
+            else:
+                action_btn.bind("<Enter>", lambda e, b=action_btn: b.config(bg="#5cbf5c"))
+                action_btn.bind("<Leave>", lambda e, b=action_btn: b.config(bg="#4CAF50"))
+                action_btn.bind("<Button-1>", lambda e, g=game: self.start_download(g))
+            
+            self.game_cards.append({
+                "frame": card_frame,
+                "action_btn": action_btn,
+                "installed": installed
+            })
+        
+        if self.game_cards:
+            self.selected_card_index = 0
+            self.highlight_selected_card()
+
+    def launch_game(self, exe_name):
+        """Executa o jogo com múltiplos métodos de fallback"""
+        try:
+            exe_path = os.path.abspath(os.path.join(Config.DOWNLOADS_DIR, exe_name))
+            
+            if not os.path.exists(exe_path):
+                messagebox.showerror("Erro", f"Arquivo não encontrado:\n{exe_path}")
+                return
+            
+            # Verifica integridade do arquivo
+            game = next((g for g in self.game_manager.games if g["exe_name"] == exe_name), None)
+            if game and "md5" in game:
+                if not self.game_manager.verify_game_integrity(exe_name, game["md5"]):
+                    messagebox.showerror("Erro", "Arquivo do jogo corrompido. Por favor, baixe novamente.")
+                    return
+            
+            # Tenta diferentes métodos de execução
+            methods = [
+                self._launch_with_subprocess,
+                self._launch_with_os_startfile,
+                self._launch_with_shellexecute
+            ]
+            
+            for method in methods:
+                if method(exe_path):
+                    return
+                
+            messagebox.showerror("Erro", "Não foi possível iniciar o jogo com nenhum método disponível.")
+            
+        except Exception as e:
+            messagebox.showerror("Erro", f"Falha ao executar o jogo:\n{str(e)}")
+
+    def _launch_with_subprocess(self, exe_path):
+        try:
+            subprocess.Popen([exe_path], cwd=os.path.dirname(exe_path))
+            return True
+        except:
+            return False
+
+    def _launch_with_os_startfile(self, exe_path):
+        try:
+            os.startfile(exe_path)
+            return True
+        except:
+            return False
+
+    def _launch_with_shellexecute(self, exe_path):
+        try:
+            ctypes.windll.shell32.ShellExecuteW(None, "open", exe_path, None, os.path.dirname(exe_path), 1)
+            return True
+        except:
+            return False
+
+    def start_download(self, game):
+        """Inicia o download do jogo"""
+        try:
+            download_window = tk.Toplevel(self.root)
+            download_window.title(f"Download - {game['title']}")
+            download_window.geometry("500x200")
+            download_window.resizable(False, False)
+            
+            tk.Label(download_window, text=f"Baixando {game['title']}...", 
+                   font=("Arial", 16)).pack(pady=10)
+            
+            progress = ttk.Progressbar(download_window, length=400, mode="determinate")
+            progress.pack(pady=10)
+            
+            threading.Thread(target=self._download_game, args=(game, progress, download_window), daemon=True).start()
+            
+        except Exception as e:
+            messagebox.showerror("Erro", f"Falha ao iniciar download: {str(e)}")
+
+    def _download_game(self, game, progress, window):
+        try:
+            exe_path = os.path.join(Config.DOWNLOADS_DIR, game["exe_name"])
+            
+            # Verifica se já existe e remove
+            if os.path.exists(exe_path):
+                os.remove(exe_path)
+            
+            with requests.get(game["download_url"], stream=True) as r:
+                r.raise_for_status()
+                total_size = int(r.headers.get('content-length', 0))
+                downloaded = 0
+                
+                with open(exe_path, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        if not self.running:  # Permite cancelar
+                            if os.path.exists(exe_path):
+                                os.remove(exe_path)
+                            return
+                            
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        progress_value = int((downloaded / total_size) * 100)
+                        progress["value"] = progress_value
+                        window.update()
+            
+            # Verifica se o download foi completado
+            if os.path.exists(exe_path) and os.path.getsize(exe_path) > 0:
+                self.root.after(0, self._download_complete, game, window)
+            else:
+                self.root.after(0, self._download_failed, "Download incompleto ou arquivo corrompido", window)
+            
+        except Exception as e:
+            self.root.after(0, self._download_failed, str(e), window)
+
+    def _download_complete(self, game, window):
+        window.destroy()
+        
+        for i, g in enumerate(self.game_manager.games):
+            if g["title"] == game["title"]:
+                card = self.game_cards[i]
+                card["action_btn"].config(text="▶ JOGAR", bg=Config.DOWNLOAD_BTN_COLOR)
+                card["action_btn"].bind("<Button-1>", lambda e, exe=game["exe_name"]: self.launch_game(exe))
+                card["action_btn"].bind("<Enter>", lambda e, b=card["action_btn"]: b.config(bg="#ff4f8d"))
+                card["action_btn"].bind("<Leave>", lambda e, b=card["action_btn"]: b.config(bg=Config.DOWNLOAD_BTN_COLOR))
+                card["installed"] = True
+                break
+        
+        messagebox.showinfo("Sucesso", f"{game['title']} instalado com sucesso!")
+
+    def _download_failed(self, error, window):
+        window.destroy()
+        messagebox.showerror("Erro", f"Falha no download: {error}")
+
+    def back_to_main(self):
+        self.current_screen = "main"
+        self.games_canvas.pack_forget()
+        self.setup_main_menu()
+
+    def update_selection(self):
+        for i in range(len(self.menu_items)):
+            color = Config.SELECTED_COLOR if i == self.selected_index else Config.MENU_COLOR
+            font = ("Arial", 22, "bold") if i == self.selected_index else ("Arial", 20)
+            self.main_canvas.itemconfig(self.menu_rects[i], fill=color)
+            self.main_canvas.itemconfig(self.menu_texts[i], font=font)
+
+    def highlight_selected_card(self):
+        for i, card in enumerate(self.game_cards):
+            border_color = Config.SELECTED_COLOR if i == self.selected_card_index else Config.CARD_BG
+            card["frame"].config(highlightbackground=border_color, highlightthickness=3)
+
+    def move_selection(self, direction):
+        if self.current_screen == "main":
+            self.move_menu_selection(direction)
+        else:
+            self.move_card_selection(direction)
+
+    def move_menu_selection(self, direction):
+        new_index = (self.selected_index - 1) % len(self.menu_items) if direction == "up" else (self.selected_index + 1) % len(self.menu_items)
+        self.selected_index = new_index
+        self.update_selection()
+        self.audio.play("navigate")
+
+    def move_card_selection(self, direction):
+        if not self.game_cards:
             return
             
-        current_buttons[self.selected_index].selected = False
-        self.selected_index = (self.selected_index + direction) % len(current_buttons)
-        current_buttons[self.selected_index].selected = True
-        self.audio.play("navigate")
-    
-    def handle_input(self):
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                return "quit"
-            
-            if event.type == pygame.KEYDOWN:
-                if event.key in (pygame.K_DOWN, pygame.K_s, pygame.K_RIGHT, pygame.K_d):
-                    self._change_selection(1 if self.tela_atual == "menu" else 3)
-                elif event.key in (pygame.K_UP, pygame.K_w, pygame.K_LEFT, pygame.K_a):
-                    self._change_selection(-1 if self.tela_atual == "menu" else -3)
-                elif event.key == pygame.K_ESCAPE and self.tela_atual != "menu":
-                    self.tela_atual = "menu"
-                    self.audio.play("back")
-                elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
-                    return self._processar_selecao()
+        if direction == "up":
+            new_index = max(0, self.selected_card_index - 3)
+        elif direction == "down":
+            new_index = min(len(self.game_cards) - 1, self.selected_card_index + 3)
+        elif direction == "left":
+            new_index = max(0, self.selected_card_index - 1)
+        else:  # right
+            new_index = min(len(self.game_cards) - 1, self.selected_card_index + 1)
         
-        # Controle PS2
-        current_time = time.time()
-        if current_time - self.last_input_time > self.input_delay:
-            dpad_x, dpad_y = self.controller.get_dpad()
-            
-            if dpad_y != 0 or dpad_x != 0:
-                direction = dpad_y if self.tela_atual == "menu" else (dpad_x * 3 + dpad_y)
-                self._change_selection(direction)
-                self.last_input_time = current_time
-        
-        if self.controller.get_button_pressed(self.controller.Button.CROSS):
-            return self._processar_selecao()
-        elif self.controller.get_button_pressed(self.controller.Button.CIRCLE) and self.tela_atual != "menu":
-            self.tela_atual = "menu"
-            self.audio.play("back")
-        
-        return None
-    
-    def _processar_selecao(self):
-        if self.tela_atual == "menu":
-            opcao = self.buttons_menu[self.selected_index].text.lower()
-            if opcao == "jogos":
-                self.tela_atual = "jogos"
-                self.selected_index = 0
-                if self.buttons_jogos:
-                    self.buttons_jogos[0].selected = True
-                self.audio.play("confirm")
-            elif opcao == "sair":
-                return "quit"
-            else:
-                self.audio.play("confirm")
-                return opcao
-        elif self.tela_atual == "jogos" and self.buttons_jogos:
-            jogo_selecionado = self.gerenciador_jogos.jogos[self.selected_index]
-            self.audio.play("confirm")
-            if self.gerenciador_jogos.executar_jogo(jogo_selecionado.nome):
-                return "game_started"
-        
-        return None
-    
-    def update(self, dt):
-        current_buttons = self.buttons_jogos if self.tela_atual == "jogos" else self.buttons_menu
-        for btn in current_buttons:
-            btn.update(dt)
-    
-    def draw(self, surface):
-        surface.blit(self.background, (0, 0))
-        
-        if self.tela_atual == "menu":
-            self._draw_menu(surface)
-        elif self.tela_atual == "jogos":
-            self._draw_jogos(surface)
-    
-    def _draw_menu(self, surface):
-        try:
-            font = pygame.font.Font(str(ASSETS_DIR / "fonts/ps_bold.ttf"), 72)
-            title = font.render("PS2 Launcher HD", True, self.theme["accent"])
-            shadow = font.render("PS2 Launcher HD", True, (0, 0, 0, 100))
-            surface.blit(shadow, (SCREEN_WIDTH//2 - shadow.get_width()//2 + 5, 105))
-            surface.blit(title, (SCREEN_WIDTH//2 - title.get_width()//2, 100))
-        except:
-            font = pygame.font.Font(None, 72)
-            title = font.render("PS2 Launcher HD", True, self.theme["accent"])
-            surface.blit(title, (SCREEN_WIDTH//2 - title.get_width()//2, 100))
-        
-        for btn in self.buttons_menu:
-            btn.draw(surface, self.theme)
-        
-        footer_text = "Use ↑↓/D-Pad para navegar | X/Enter para selecionar"
-        font = pygame.font.Font(None, 24)
-        footer = font.render(footer_text, True, (150, 150, 150))
-        surface.blit(footer, (SCREEN_WIDTH//2 - footer.get_width()//2, SCREEN_HEIGHT - 40))
-    
-    def _draw_jogos(self, surface):
-        font = pygame.font.Font(str(ASSETS_DIR / "fonts/ps_bold.ttf"), 48)
-        title = font.render("Biblioteca de Jogos", True, self.theme["accent"])
-        surface.blit(title, (SCREEN_WIDTH//2 - title.get_width()//2, 50))
-        
-        if not self.buttons_jogos:
-            font = pygame.font.Font(None, 36)
-            msg = font.render("Nenhum jogo encontrado", True, self.theme["text"])
-            surface.blit(msg, (SCREEN_WIDTH//2 - msg.get_width()//2, SCREEN_HEIGHT//2))
-        else:
-            for btn in self.buttons_jogos:
-                btn.draw(surface, self.theme)
-        
-        footer_text = "Pressione ○/ESC para voltar | X/Enter para iniciar"
-        font = pygame.font.Font(None, 24)
-        footer = font.render(footer_text, True, (150, 150, 150))
-        surface.blit(footer, (SCREEN_WIDTH//2 - footer.get_width()//2, SCREEN_HEIGHT - 40))
+        if new_index != self.selected_card_index:
+            self.selected_card_index = new_index
+            self.highlight_selected_card()
+            self.audio.play("navigate")
 
-#=============== LOOP PRINCIPAL ===============
-def main():
-    audio = AudioSystem()
-    controller = PS2Controller()
-    menu = MainMenu(audio, controller)
-    clock = pygame.time.Clock()
-    running = True
-    
-    # Toca som de inicialização
-    if "startup" in audio.sounds:
-        audio.play("startup")
-    
-    while running:
-        dt = clock.tick(60) / 1000.0
+    def select_item(self):
+        self.audio.play("confirm")
         
-        result = menu.handle_input()
-        if result == "quit":
-            running = False
-        elif result == "game_started":
-            # Aqui você pode adicionar lógica enquanto o jogo está rodando
-            pass
-        
-        menu.update(dt)
-        menu.draw(screen)
-        pygame.display.flip()
-    
-    pygame.quit()
-    sys.exit()
+        if self.current_screen == "main":
+            if self.menu_items[self.selected_index] == "Jogos":
+                self.show_games_menu()
+            else:
+                self.quit_app()
+        else:
+            card = self.game_cards[self.selected_card_index]
+            for child in card["frame"].winfo_children():
+                if isinstance(child, tk.Label) and child.cget("text") in ["▶ JOGAR", "⬇ DOWNLOAD"]:
+                    child.event_generate("<Button-1>")
+                    break
+
+    def show_games_menu(self):
+        self.current_screen = "games"
+        self.main_canvas.pack_forget()
+        self.setup_games_menu()
+
+    def back_action(self):
+        self.audio.play("back")
+        if self.current_screen == "games":
+            self.back_to_main()
+
+    def start_control_loop(self):
+        """Inicia o loop de controle usando root.after para evitar problemas de threading"""
+        self.process_joystick_events()
+        if self.running:
+            self.root.after(10, self.start_control_loop)
+
+    def process_joystick_events(self):
+        """Processa eventos do joystick e teclado"""
+        for event in pygame.event.get():
+            if event.type == pygame.JOYAXISMOTION:
+                if event.axis == 1:  # Eixo Y
+                    if event.value < -0.7:
+                        self.move_selection("up")
+                    elif event.value > 0.7:
+                        self.move_selection("down")
+                elif event.axis == 0:  # Eixo X
+                    if event.value < -0.7:
+                        self.move_selection("left")
+                    elif event.value > 0.7:
+                        self.move_selection("right")
+            
+            elif event.type == pygame.JOYHATMOTION:
+                if event.value[1] == 1:  # Cima
+                    self.move_selection("up")
+                elif event.value[1] == -1:  # Baixo
+                    self.move_selection("down")
+                elif event.value[0] == -1:  # Esquerda
+                    self.move_selection("left")
+                elif event.value[0] == 1:  # Direita
+                    self.move_selection("right")
+            
+            elif event.type == pygame.JOYBUTTONDOWN:
+                if event.button == 0:  # X
+                    self.select_item()
+                elif event.button == 1:  # Circle
+                    self.back_action()
+            
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_UP:
+                    self.move_selection("up")
+                elif event.key == pygame.K_DOWN:
+                    self.move_selection("down")
+                elif event.key == pygame.K_LEFT:
+                    self.move_selection("left")
+                elif event.key == pygame.K_RIGHT:
+                    self.move_selection("right")
+                elif event.key == pygame.K_RETURN:
+                    self.select_item()
+                elif event.key == pygame.K_ESCAPE:
+                    self.back_action()
+
+    def quit_app(self):
+        self.running = False
+        pygame.quit()
+        self.root.destroy()
 
 if __name__ == "__main__":
-    main()
+    if not Utils.is_admin():
+        Utils.run_as_admin()
+    
+    try:
+        pygame.init()
+        root = tk.Tk()
+        app = GameLauncherUI(root)
+        root.mainloop()
+    except Exception as e:
+        print(f"Erro fatal: {e}")
+        traceback.print_exc()
+        input("Pressione Enter para sair...")
